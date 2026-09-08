@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <data>
+        <record id="res_config_settings_view_form_china_ocr" model="ir.ui.view">
+            <field name="name">res.config.settings.view.form.inherit.hr.expense.china.ocr</field>
+            <field name="model">res.config.settings</field>
+            <field name="priority" eval="90"/>
+            <field name="inherit_id" ref="hr_expense.res_config_settings_view_form"/>
+            <field name="arch" type="xml">
+                <xpath expr="//setting[@id='expense_extract_settings']" position="after">
+                    <setting id="china_ocr_settings" string="国内在线 OCR 配置 (China Cloud OCR)" help="配置百度智能云、腾讯云或自定义在线 OCR 引擎识别费用发票">
+                        <field name="china_ocr_provider" widget="radio"/>
+                        <div class="content-group mt16">
+                            <div class="row mt8">
+                                <label for="china_ocr_api_key" class="col-lg-3 o_light_label"/>
+                                <field name="china_ocr_api_key" placeholder="请输入 API Key / SecretId"/>
+                            </div>
+                            <div class="row mt8">
+                                <label for="china_ocr_secret_key" class="col-lg-3 o_light_label"/>
+                                <field name="china_ocr_secret_key" password="True" placeholder="请输入 Secret Key / Client Secret"/>
+                            </div>
+                            <div class="row mt8">
+                                <label for="china_ocr_api_url" class="col-lg-3 o_light_label"/>
+                                <field name="china_ocr_api_url" placeholder="https://aip.baidubce.com/rest/2.0/ocr/v1/vat_invoice"/>
+                            </div>
+                            <div class="row mt8" invisible="china_ocr_provider != 'baidu'">
+                                <label for="china_ocr_token_url" class="col-lg-3 o_light_label"/>
+                                <field name="china_ocr_token_url" placeholder="https://aip.baidubce.com/oauth/2.0/token"/>
+                            </div>
+                        </div>
+                    </setting>
+                </xpath>
+            </field>
+        </record>
+    </data>
+</odoo>
