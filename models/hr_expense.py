@@ -33,49 +33,71 @@ class HrExpense(models.Model):
         }
 
     @api.model
+    def _clean_subject_prefix(self, subject):
+        """Clean email subject prefixes like '主题: ', 'Subject: ', 'Re: ', 'Fwd: '."""
+        if not subject:
+            return ''
+        return re.sub(r'^(?:主题|Subject|re|fwd|fw)[:：\s]+', '', str(subject), flags=re.IGNORECASE).strip()
+
+    @api.model
     def _parse_expense_date(self, expense_description):
         """Parse date from expense description (email subject).
         Supports:
-        1. Bracket format: '[2024-12-05]', '[2024/12/05]', '[2024.12.05]'
-        2. Chinese format: '2024年12月05日'
-        3. Standalone standard date: '2024-12-05', '2024/12/05', '2024.12.05'
+        1. Bracket format (half-width, full-width, Chinese quotes):
+           '[2025-12-26]', '［2025-12-26］', '【2025-12-26】', '(2025-12-26)', '（2025-12-26）',
+           including internal spaces like '[ 2025-12-26 ]'
+        2. Chinese format: '2025年12月26日'
+        3. Standalone standard date: '2025-12-26', '2025/12/26', '2025.12.26'
         Returns: (parsed_date_str_or_False, clean_description)
         """
         if not expense_description:
             return False, expense_description
 
-        # 1. Match bracket format first, e.g. [2024-12-05], [2024/12/05], [2024.12.05]
-        bracket_match = re.search(r'\[(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})\]', expense_description)
+        desc = self._clean_subject_prefix(expense_description)
+
+        # 1. Match bracket formats: [], ［］, 【】, (), （）
+        bracket_pattern = r'[\[［【\(（]\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{4}年\d{1,2}月\d{1,2}日?)\s*[\]］】\)）]'
+        bracket_match = re.search(bracket_pattern, desc)
         if bracket_match:
             full_str = bracket_match.group(0)
             raw_date = bracket_match.group(1)
             formatted_date = self._format_date_str(raw_date)
             if formatted_date:
-                clean_description = expense_description.replace(full_str, ' ')
+                clean_description = desc.replace(full_str, ' ')
                 clean_description = re.sub(r'\s+', ' ', clean_description).strip()
                 return formatted_date, clean_description
 
         # 2. Match Chinese date format, e.g. 2024年12月05日
-        cn_match = re.search(r'(\d{4}年\d{1,2}月\d{1,2}日?)', expense_description)
+        cn_match = re.search(r'(\d{4}年\d{1,2}月\d{1,2}日?)', desc)
         if cn_match:
             full_str = cn_match.group(0)
             formatted_date = self._format_date_str(full_str)
             if formatted_date:
-                clean_description = expense_description.replace(full_str, ' ')
+                clean_description = desc.replace(full_str, ' ')
                 clean_description = re.sub(r'\s+', ' ', clean_description).strip()
                 return formatted_date, clean_description
 
         # 3. Match standalone date format, e.g. 2024-12-05, 2024/12/05, 2024.12.05
-        std_match = re.search(r'(?:^|[\s,;])(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:$|[\s,;])', expense_description)
+        std_match = re.search(r'(?:^|[\s,;])(\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?:$|[\s,;])', desc)
         if std_match:
             raw_date = std_match.group(1)
             formatted_date = self._format_date_str(raw_date)
             if formatted_date:
-                clean_description = expense_description.replace(raw_date, ' ')
+                clean_description = desc.replace(raw_date, ' ')
                 clean_description = re.sub(r'\s+', ' ', clean_description).strip()
                 return formatted_date, clean_description
 
-        return False, expense_description
+        return False, desc
+
+    @api.model
+    def _parse_expense_subject(self, expense_description, currencies):
+        """Override to strip date from subject before product/price parsing,
+        ensuring expense name never retains date tags like [2025-12-26]."""
+        parsed_date, clean_desc = self._parse_expense_date(expense_description)
+        if parsed_date:
+            expense_description = clean_desc
+
+        return super()._parse_expense_subject(expense_description, currencies)
 
     @api.model
     def message_new(self, msg_dict, custom_values=None):
@@ -83,32 +105,55 @@ class HrExpense(models.Model):
         If a date is found in subject:
         1. Inject 'date': parsed_date and 'date_from_subject': True into custom_values.
         2. Clean the date from msg_dict['subject'] so _parse_price does not mistake the year/date for amount.
+        3. Double check the created expense to ensure date and date_from_subject are strictly applied.
         """
         if custom_values is None:
             custom_values = {}
 
         subject = msg_dict.get('subject', '')
-        if subject:
-            parsed_date, clean_subject = self._parse_expense_date(subject)
-            if parsed_date:
-                msg_dict['subject'] = clean_subject
-                custom_values.setdefault('date', parsed_date)
-                custom_values.setdefault('date_from_subject', True)
+        parsed_date, clean_subject = self._parse_expense_date(subject)
+        if parsed_date:
+            msg_dict['subject'] = clean_subject
+            custom_values['date'] = parsed_date
+            custom_values['date_from_subject'] = True
 
-        return super().message_new(msg_dict, custom_values=custom_values)
+        expense = super().message_new(msg_dict, custom_values=custom_values)
+
+        # Fallback safeguard: if expense was created but date was not set to subject date, force update
+        if parsed_date and expense:
+            write_vals = {}
+            if expense.date != fields.Date.to_date(parsed_date):
+                write_vals['date'] = parsed_date
+            if not expense.date_from_subject:
+                write_vals['date_from_subject'] = True
+            if expense.name and (parsed_date in expense.name or '[' in expense.name):
+                _, clean_name = self._parse_expense_date(expense.name)
+                if clean_name != expense.name:
+                    write_vals['name'] = clean_name
+            if write_vals:
+                expense.write(write_vals)
+
+        return expense
 
     @api.model
     def _parse_product(self, expense_description):
         """Enhanced product parser:
         1. Supports bracket format anywhere in subject, e.g. '购买饮料、水果及糕点等食品 [FOOD_STF] 340.57'
         2. Matches product default_code (Internal Reference / 内部引用代码) or Name
-        3. Removes [CODE] from description text and sets matched product category
+        3. Skips brackets that represent date values (e.g. [2025-12-26])
+        4. Removes [CODE] from description text and sets matched product category
         """
         if expense_description:
-            match = re.search(r'\[(.*?)\]', expense_description)
-            if match:
-                full_bracket_str = match.group(0)  # e.g. '[FOOD_STF]'
-                code = match.group(1).strip()       # e.g. 'FOOD_STF'
+            # Find all bracket pairs: [], ［］, 【】
+            bracket_pattern = r'[\[［【](.*?)[\]］】]'
+            matches = list(re.finditer(bracket_pattern, expense_description))
+            for match in matches:
+                full_bracket_str = match.group(0)
+                code = match.group(1).strip()
+
+                # Skip if this bracket is a date format
+                if self._format_date_str(code):
+                    continue
 
                 product = self.env['product.product'].search([
                     ('can_be_expensed', '=', True),
@@ -465,7 +510,7 @@ class HrExpense(models.Model):
             return {
                 'description': {'selected_value': {'content': res_json.get('description', '发票报销')}},
                 'total': {'selected_value': {'content': float(res_json.get('total', 0.0))}},
-                'date': {'selected_value': {'content': self._format_date_str(res_json.get('date', ''))}},
+                'date': {'selected_value': {'content': str(res_json.get('date', ''))}},
                 'currency': {'selected_value': {'content': res_json.get('currency', 'CNY')}},
             }
         return res_json
